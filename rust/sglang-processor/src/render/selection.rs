@@ -32,6 +32,36 @@ pub fn select_chat_formatter(
     if config.tokenizer_path.is_empty() {
         return (None, None);
     }
+    // Prototype: an Affordance template view for this model, named by the environment
+    // (SGLANG_AFFORDANCE_VIEW, a .tsx file; SGLANG_AFFORDANCE_ENTRY, its component;
+    // SGLANG_AFFORDANCE_TOKENIZER, the model's tokenizer.json).
+    if let (Ok(view), Ok(entry), Ok(tokenizer)) = (
+        std::env::var("SGLANG_AFFORDANCE_VIEW"),
+        std::env::var("SGLANG_AFFORDANCE_ENTRY"),
+        std::env::var("SGLANG_AFFORDANCE_TOKENIZER"),
+    ) {
+        let mut options = affordance::chat_render::Options::new(view, entry, tokenizer);
+        // `bos_token` and the like, as the template names them: a string or `{"content": ...}`.
+        let config_file = resolve_model_file(&config.tokenizer_path, config.revision.as_deref(), "tokenizer_config.json");
+        if let Some(text) = config_file.and_then(|file| std::fs::read_to_string(file).ok())
+            && let Ok(tokenizer_config) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            for name in ["bos_token", "eos_token", "pad_token", "unk_token"] {
+                let token = match &tokenizer_config[name] {
+                    serde_json::Value::String(token) => Some(token.clone()),
+                    serde_json::Value::Object(fields) => fields.get("content").and_then(|c| c.as_str()).map(str::to_owned),
+                    _ => None,
+                };
+                if let Some(token) = token {
+                    options.special[name] = serde_json::Value::String(token);
+                }
+            }
+        }
+        return match affordance::chat_render::ChatRenderer::json(options) {
+            Ok(renderer) => (Some(ChatFormatter::Affordance(std::sync::Arc::new(renderer))), None),
+            Err(error) => (None, Some(error)),
+        };
+    }
     let tokenizer_config_file = resolve_model_file(
         &config.tokenizer_path,
         config.revision.as_deref(),
