@@ -51,9 +51,14 @@ impl Race {
         )
         .unwrap();
         Race {
-            theirs: theirs.unwrap_or_else(|| panic!("{error:?}")),
+            theirs: theirs.clone().unwrap_or_else(|| panic!("{error:?}")),
             tokenizer: load_tokenizer(Some(dir.join("tokenizer.json").to_str().unwrap()), None, true).unwrap(),
-            ours: ChatFormatter::Affordance(Arc::new(affordance::chat_render::ChatRenderer::json(options).unwrap())),
+            ours: ChatFormatter::Affordance {
+                renderer: Arc::new(
+                    affordance::chat_render::ChatRenderer::new(options, sglang_processor::affordance_message).unwrap(),
+                ),
+                own: Box::new(theirs.clone().unwrap()),
+            },
             model,
         }
     }
@@ -190,5 +195,76 @@ fn affordance_race() {
         ours as f64 / 1e6,
         theirs as f64 / ours as f64,
     );
-    assert_eq!(different + different_interleaved, 0, "the two formatters must produce the same ids");
+
+    // A tool-using agent: tools declared, calls whose arguments are a JSON string (as a client
+    // sends them), results, answers.
+    let tools = json!([
+        {"type": "function", "function": {"name": "bash", "description": "Run a shell command and return its output.",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The command."}, "timeout": {"type": "integer"}}, "required": ["command"]}}},
+        {"type": "function", "function": {"name": "read", "description": "Read a file.",
+            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}
+    ]);
+    let with_tools = |messages: &[Value]| {
+        let mut request = request(messages);
+        request["tools"] = tools.clone();
+        request
+    };
+    let output = "src/main.rs\nsrc/lib.rs\nCargo.toml\n".repeat(30);
+    let mut turns = vec![json!({"role": "system", "content": "You are a careful coding assistant."})];
+    let (mut theirs, mut ours, mut different_tools, mut last) = (0u128, 0u128, 0, 0);
+    let mut first_tool_difference = None;
+    let steps = 60;
+    for i in 0..steps {
+        turns.push(json!({"role": "user", "content": format!("Step {i}: list the files, then read one.")}));
+        turns.push(json!({"role": "assistant", "content": format!("Listing for step {i}."), "tool_calls": [{"id": format!("call_{i}_a"), "type": "function",
+            "function": {"name": "bash", "arguments": json!({"command": format!("ls -la step{i}"), "timeout": 30}).to_string()}}]}));
+        turns.push(json!({"role": "tool", "tool_call_id": format!("call_{i}_a"), "content": output}));
+        turns.push(json!({"role": "assistant", "content": format!("Step {i} is done.")}));
+        let mut messages = turns.clone();
+        messages.push(json!({"role": "user", "content": "continue"}));
+        let request = with_tools(&messages);
+        let t = Instant::now();
+        let want = race.theirs(&request);
+        theirs += t.elapsed().as_nanos();
+        let t = Instant::now();
+        let got = race.ours(&request);
+        ours += t.elapsed().as_nanos();
+        if got != want {
+            different_tools += 1;
+            if first_tool_difference.is_none() {
+                let at = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
+                let near = |ids: &[u32]| {
+                    race.tokenizer
+                        .decode(&ids[at.saturating_sub(12)..(at + 14).min(ids.len())], false)
+                        .map(|d| format!("{d:?}"))
+                        .unwrap_or_default()
+                };
+                first_tool_difference = Some(format!("step {i}: differs at token {at}\n    theirs: {}\n    ours:   {}", near(&want), near(&got)));
+            }
+        }
+        last = want.len();
+    }
+    println!(
+        "  a tool-using agent, {steps} requests growing to {last} tokens; different on {different_tools}\n  \
+         sglang {:.0} ms   affordance {:.0} ms   {:.1}x",
+        theirs as f64 / 1e6,
+        ours as f64 / 1e6,
+        theirs as f64 / ours as f64,
+    );
+    if let Some(difference) = first_tool_difference {
+        println!("  {difference}");
+    }
+
+    // What the view does not render is the model's own formatter's: the same ids, by construction.
+    let continued = {
+        let mut request = request(&[json!({"role": "user", "content": "count to five"}), json!({"role": "assistant", "content": "one, two,"})]);
+        request["continue_final_message"] = json!(true);
+        request
+    };
+    assert_eq!(
+        race.ours.encode_request(continued.clone(), &HashMap::new()).map(|ids| ids.ok()),
+        race.theirs.encode_request(continued, &HashMap::new()).map(|ids| ids.ok()),
+        "a continued final message goes to the model's own formatter"
+    );
+    assert_eq!(different + different_interleaved + different_tools, 0, "the two formatters must produce the same ids");
 }

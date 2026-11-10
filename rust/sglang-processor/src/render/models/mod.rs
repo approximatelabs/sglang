@@ -12,9 +12,11 @@ pub use self::deepseek_v4::DeepSeekTokenizer;
 pub(super) use self::deepseek_v4::{
     render as render_deepseek_v4, thinking as deepseek_v4_thinking,
 };
-pub(super) use self::glm53::{is_glm53, render as render_glm53};
+pub(super) use self::glm53::{is_glm53, render as render_glm53, template_tools as glm53_tools};
 pub(super) use self::kimi_k3::render as render_kimi_k3;
 pub(super) use self::kimi_k25::{deep_sort, encode_tools_to_typescript};
 pub use self::pydantic_dump::continues_final_message;
 pub(super) use self::pydantic_dump::{function_dump, pydantic_bool, split_continuation};
-pub(super) use self::qwen38::{is_qwen38, render as render_qwen38, takes_content_parts};
+pub(super) use self::qwen38::{
+    is_qwen38, render as render_qwen38, takes_content_parts, template_tools as qwen38_tools,
+};

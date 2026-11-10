@@ -22,7 +22,8 @@ use self::legacy::LegacyFormatter;
 pub use self::loader::load_chat_formatter;
 pub use self::models::{DeepSeekTokenizer, continues_final_message};
 use self::models::{
-    deep_sort, deepseek_v4_thinking, encode_tools_to_typescript, is_glm53, is_qwen38,
+    deep_sort, deepseek_v4_thinking, encode_tools_to_typescript, glm53_tools, is_glm53, is_qwen38,
+    qwen38_tools,
     render_deepseek_v4, render_glm53, render_kimi_k3, render_qwen38, takes_content_parts,
 };
 pub use self::reasoning::{requested_effort, requested_thinking};
@@ -52,8 +53,12 @@ pub enum ChatFormatter {
     },
     /// An Affordance template view: a chat request rendered straight to prompt ids (no Jinja
     /// render, no tokenizer pass), and a conversation that grows by a turn costs what is new.
-    /// Only [`Self::encode_request`] renders it.
-    Affordance(Arc<affordance::chat_render::ChatRenderer>),
+    /// [`Self::encode_request`] renders it. Everything else, and every request the view does
+    /// not render, is the model's own formatter's (`own`).
+    Affordance {
+        renderer: Arc<affordance::chat_render::ChatRenderer>,
+        own: Box<ChatFormatter>,
+    },
     /// DeepSeek-V4 through deepseek-recipe, with the checkpoint tokenizer when known.
     DeepSeekV4(Option<Arc<DeepSeekTokenizer>>),
     /// DeepSeek-V4.1 through deepseek-recipe, with the checkpoint tokenizer when known.
@@ -142,9 +147,7 @@ impl ChatFormatter {
                     .map(|(prompt, _)| prompt)
             }
             ChatFormatter::Legacy(formatter) => formatter.render(request).map(RenderedPrompt::text),
-            ChatFormatter::Affordance(_) => Err(TemplateError::Renderer {
-                message: "the affordance formatter renders prompt ids, not text".into(),
-            }),
+            ChatFormatter::Affordance { own, .. } => own.render_prompt(request),
         }
     }
 
@@ -160,6 +163,9 @@ impl ChatFormatter {
         default_kwargs: &HashMap<String, Value>,
     ) -> Result<(RenderedPrompt, String), TemplateError> {
         let text = |(prompt, prefix)| (RenderedPrompt::text(prompt), prefix);
+        if let ChatFormatter::Affordance { own, .. } = self {
+            return own.render_request(request, default_kwargs);
+        }
         match self {
             // recipe renders a continued final message itself, so no prefix follows.
             ChatFormatter::DeepSeekV4(_) => render_deepseek_v4(false, request, default_kwargs)
@@ -207,8 +213,22 @@ impl ChatFormatter {
         request: Value,
         default_kwargs: &HashMap<String, Value>,
     ) -> Option<Result<Vec<u32>, TemplateError>> {
-        if let ChatFormatter::Affordance(renderer) = self {
-            return Some(render_affordance(renderer, &request, default_kwargs));
+        if let ChatFormatter::Affordance { renderer, own } = self {
+            // The view's ids, or the model's own formatter for what the view does not render.
+            // The tools as the model's own formatter gives them to its template (SGLang dumps
+            // them its own way for some models), so the prompt is the one SGLang would send.
+            let tools = match own.as_ref() {
+                ChatFormatter::Qwen38 { .. } => qwen38_tools(&request).map(|tools| tools.map(Value::Array)),
+                ChatFormatter::Glm53(_) => glm53_tools(&request).map(|tools| tools.map(Value::Array)),
+                _ => Ok(request.get("tools").filter(|tools| !tools.is_null()).cloned()),
+            };
+            let Ok(tools) = tools else {
+                return own.encode_request(request, default_kwargs);
+            };
+            return match render_affordance(renderer, &request, tools.as_ref(), default_kwargs) {
+                Some(ids) => Some(ids),
+                None => own.encode_request(request, default_kwargs),
+            };
         }
         let tokenizer = match self {
             ChatFormatter::DeepSeekV4(tokenizer) | ChatFormatter::DeepSeekV41(tokenizer) => {
@@ -238,8 +258,8 @@ impl ChatFormatter {
             | ChatFormatter::DeepSeekV41(_)
             | ChatFormatter::Glm53(_)
             | ChatFormatter::KimiK3
-            | ChatFormatter::Affordance(_)
             | ChatFormatter::Qwen38 { .. } => None,
+            ChatFormatter::Affordance { own, .. } => own.stop_strs(),
             ChatFormatter::Legacy(formatter) => formatter.spec.stop_str.clone(),
         }
     }
@@ -248,6 +268,7 @@ impl ChatFormatter {
     /// GLM-5.3's (`glm53_always_think`) and the Jinja templates it detects.
     pub fn always_thinks(&self) -> bool {
         match self {
+            ChatFormatter::Affordance { own, .. } => own.always_thinks(),
             ChatFormatter::Glm53(_) => true,
             ChatFormatter::HuggingFace { thinking, .. }
             | ChatFormatter::KimiK25 { thinking, .. } => {
@@ -262,6 +283,7 @@ impl ChatFormatter {
     /// and the Jinja templates it detects.
     pub fn reasoning_toggle(&self) -> Option<(&'static str, bool)> {
         match self {
+            ChatFormatter::Affordance { own, .. } => own.reasoning_toggle(),
             ChatFormatter::Qwen38 { .. } => Some(("enable_thinking", true)),
             ChatFormatter::HuggingFace { thinking, .. }
             | ChatFormatter::KimiK25 { thinking, .. } => match thinking.default_policy() {
@@ -303,25 +325,30 @@ impl ChatFormatter {
             }
             // `template_detection`'s `glm53_always_think`.
             ChatFormatter::Glm53(_) => Some(true),
-            ChatFormatter::Legacy(_) | ChatFormatter::Affordance(_) => None,
+            ChatFormatter::Legacy(_) => None,
+            ChatFormatter::Affordance { own, .. } => own.resolve_thinking(args, tools_enabled, named_tool_choice),
         }
     }
 }
 
 /// A chat request's prompt ids through an Affordance template view: the request's messages and
-/// tools as they are, and the template's arguments (the server's defaults under the request's
-/// `chat_template_kwargs`). A request the model's template rejects comes back as its error.
+/// tools, and the template's arguments (the server's defaults under the request's
+/// `chat_template_kwargs`). `None`: a request the view does not render (a continued final
+/// message, content that is not text), which is the model's own formatter's. A request the
+/// model's template rejects comes back as its error.
 fn render_affordance(
     renderer: &affordance::chat_render::ChatRenderer,
     request: &Value,
+    tools: Option<&Value>,
     default_kwargs: &HashMap<String, Value>,
-) -> Result<Vec<u32>, TemplateError> {
-    let failed = |message: String| TemplateError::Renderer { message };
+) -> Option<Result<Vec<u32>, TemplateError>> {
     if request["continue_final_message"].as_bool().unwrap_or(false) {
-        return Err(failed("the affordance formatter does not support continue_final_message yet".into()));
+        return None;
     }
-    let empty = Vec::new();
-    let messages = request["messages"].as_array().unwrap_or(&empty);
+    let messages = request["messages"].as_array()?;
+    if messages.iter().any(|m| !(m["content"].is_string() || m["content"].is_null())) {
+        return None;
+    }
     let mut kwargs = serde_json::Map::new();
     for (name, value) in default_kwargs {
         kwargs.insert(name.clone(), value.clone());
@@ -336,10 +363,25 @@ fn render_affordance(
         kwargs.insert("enable_thinking".into(), Value::Bool(minijinja::Value::from_serialize(&thinking).is_true()));
     }
     kwargs.insert("add_generation_prompt".into(), Value::Bool(true));
-    let tools = request.get("tools").filter(|tools| !tools.is_null());
-    renderer
-        .render(messages, tools, &Value::Object(kwargs))
-        .map_err(|error| failed(error.to_string()))
+    match renderer.render(messages, tools, &Value::Object(kwargs)) {
+        Ok(ids) => Some(Ok(ids)),
+        Err(affordance::chat_render::RenderError::Raised(message)) => Some(Err(TemplateError::Renderer { message })),
+        Err(affordance::chat_render::RenderError::Failed(_)) => None,
+    }
+}
+
+/// A request's message as a chat template reads it: a tool call's arguments as an object (a
+/// client sends them as a JSON string). Run by the renderer for messages it has not seen.
+pub fn affordance_message(message: &Value) -> Result<Value, String> {
+    let mut message = message.clone();
+    for call in message["tool_calls"].as_array_mut().into_iter().flatten() {
+        if let Some(text) = call["function"]["arguments"].as_str()
+            && let Ok(arguments) = serde_json::from_str::<Value>(text)
+        {
+            call["function"]["arguments"] = arguments;
+        }
+    }
+    Ok(message)
 }
 
 fn render_oai(

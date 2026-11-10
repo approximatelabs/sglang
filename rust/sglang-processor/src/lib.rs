@@ -37,7 +37,7 @@ pub use parser::{
 pub use render::{
     ChatFormatter, ChatFormatterOptions, DeepSeekTokenizer, OneOrMany, TemplateArgs, TemplateError,
     ThinkingTemplates, continues_final_message, load_chat_formatter, requested_effort,
-    requested_thinking, select_chat_formatter,
+    affordance_message, requested_thinking, select_chat_formatter,
 };
 #[cfg(any(feature = "parser", feature = "openai"))]
 pub use think::ReasoningOptions;

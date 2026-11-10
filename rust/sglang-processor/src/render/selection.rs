@@ -29,13 +29,13 @@ struct ModelIdentity {
 pub fn select_chat_formatter(
     config: &ChatFormatterOptions,
 ) -> (Option<ChatFormatter>, Option<String>) {
-    if config.tokenizer_path.is_empty() {
-        return (None, None);
-    }
-    // Prototype: an Affordance template view for this model, named by the environment
+    let (own, error) = select_own_chat_formatter(config);
+    // Prototype: an Affordance template view in front of the model's own formatter, named by the
+    // environment
     // (SGLANG_AFFORDANCE_VIEW, a .tsx file; SGLANG_AFFORDANCE_ENTRY, its component;
     // SGLANG_AFFORDANCE_TOKENIZER, the model's tokenizer.json).
-    if let (Ok(view), Ok(entry), Ok(tokenizer)) = (
+    if let (Some(own), Ok(view), Ok(entry), Ok(tokenizer)) = (
+        own.clone(),
         std::env::var("SGLANG_AFFORDANCE_VIEW"),
         std::env::var("SGLANG_AFFORDANCE_ENTRY"),
         std::env::var("SGLANG_AFFORDANCE_TOKENIZER"),
@@ -57,10 +57,23 @@ pub fn select_chat_formatter(
                 }
             }
         }
-        return match affordance::chat_render::ChatRenderer::json(options) {
-            Ok(renderer) => (Some(ChatFormatter::Affordance(std::sync::Arc::new(renderer))), None),
+        return match affordance::chat_render::ChatRenderer::new(options, super::affordance_message) {
+            Ok(renderer) => (
+                Some(ChatFormatter::Affordance { renderer: std::sync::Arc::new(renderer), own: Box::new(own) }),
+                None,
+            ),
             Err(error) => (None, Some(error)),
         };
+    }
+    (own, error)
+}
+
+/// The model's own formatter: its Jinja template, or one of the renderers written for it.
+fn select_own_chat_formatter(
+    config: &ChatFormatterOptions,
+) -> (Option<ChatFormatter>, Option<String>) {
+    if config.tokenizer_path.is_empty() {
+        return (None, None);
     }
     let tokenizer_config_file = resolve_model_file(
         &config.tokenizer_path,

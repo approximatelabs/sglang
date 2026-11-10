@@ -145,7 +145,7 @@ fn template_args(
 
 /// `_process_messages`: the request tools, pydantic-dumped; only the named tool
 /// for a named `tool_choice`, and none for `"none"`.
-fn template_tools(request: &Value) -> Result<Option<Vec<Value>>, String> {
+pub(crate) fn template_tools(request: &Value) -> Result<Option<Vec<Value>>, String> {
     let choice = &request["tool_choice"];
     let Some(tools) = request["tools"]
         .as_array()

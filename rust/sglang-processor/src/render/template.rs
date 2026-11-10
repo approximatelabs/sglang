@@ -64,7 +64,7 @@ impl ChatFormatter {
             .clone()
             .map_err(|message| TemplateError::Renderer { message })?;
         let (messages, continuation) = match self {
-            ChatFormatter::Legacy(_) | ChatFormatter::Affordance(_) => None,
+            ChatFormatter::Legacy(_) => None,
             // SGLang's K3 encoder splits a trailing assistant turn off only to continue it.
             ChatFormatter::KimiK3 if !continuing => None,
             _ => last_assistant_message(request, continuing)?,
