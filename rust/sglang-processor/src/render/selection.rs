@@ -40,6 +40,7 @@ pub fn select_chat_formatter(
         std::env::var("SGLANG_AFFORDANCE_ENTRY"),
         std::env::var("SGLANG_AFFORDANCE_TOKENIZER"),
     ) {
+        tracing::info!(view = %view, entry = %entry, "chat requests render through an Affordance view; what it does not cover goes to the model's own formatter");
         let mut options = affordance::chat_render::Options::new(view, entry, tokenizer);
         // `bos_token` and the like, as the template names them: a string or `{"content": ...}`.
         let config_file = resolve_model_file(&config.tokenizer_path, config.revision.as_deref(), "tokenizer_config.json");

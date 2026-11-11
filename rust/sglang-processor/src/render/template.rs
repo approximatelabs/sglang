@@ -89,7 +89,7 @@ impl ChatFormatter {
 
 /// The tools Python's Jinja path hands the template: the request's (only the
 /// named one under a named `tool_choice`, none under `"none"`), as `Tool.model_dump()`.
-fn jinja_tools(body: &Value) -> Option<Value> {
+pub(super) fn jinja_tools(body: &Value) -> Option<Value> {
     let tools = body["tools"].as_array()?;
     let named = match &body["tool_choice"] {
         Value::String(choice) if choice == "none" => return None,

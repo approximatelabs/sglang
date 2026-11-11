@@ -220,7 +220,9 @@ impl ChatFormatter {
             let tools = match own.as_ref() {
                 ChatFormatter::Qwen38 { .. } => qwen38_tools(&request).map(|tools| tools.map(Value::Array)),
                 ChatFormatter::Glm53(_) => glm53_tools(&request).map(|tools| tools.map(Value::Array)),
-                _ => Ok(request.get("tools").filter(|tools| !tools.is_null()).cloned()),
+                // A Jinja template sees the tools as SGLang dumps them (a null `description`
+                // and `defer_loading` where the client sent none).
+                _ => Ok(template::jinja_tools(&request)),
             };
             let Ok(tools) = tools else {
                 return own.encode_request(request, default_kwargs);
