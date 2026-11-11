@@ -268,3 +268,44 @@ fn affordance_race() {
     );
     assert_eq!(different + different_interleaved + different_tools, 0, "the two formatters must produce the same ids");
 }
+
+/// The worst case for a renderer that remembers: every request is a conversation it has never
+/// seen (more of them than it keeps), so nothing is reused. One request each.
+#[test]
+#[ignore = "needs AFFORDANCE_ROOT and AFFORDANCE_MODEL"]
+fn affordance_race_cold() {
+    let race = Race::load();
+    let warm = request(&[json!({"role": "user", "content": "warm up"})]);
+    race.theirs(&warm);
+    race.ours(&warm);
+    for (pairs, conversations) in [(1usize, 3072usize), (20, 512), (160, 96)] {
+        let (mut theirs, mut ours, mut different, mut tokens) = (0u128, 0u128, 0, 0);
+        for c in 0..conversations {
+            let text = format!("Conversation {c} of {pairs}: the quick brown fox {c} jumps over the lazy dog. ").repeat(30);
+            let mut messages = vec![json!({"role": "system", "content": format!("You are careful coding assistant number {c}.")})];
+            for i in 0..pairs {
+                messages.push(json!({"role": "user", "content": format!("Step {i}: {text}")}));
+                messages.push(json!({"role": "assistant", "content": format!("Done with step {i}. {text}")}));
+            }
+            messages.push(json!({"role": "user", "content": "continue"}));
+            let request = request(&messages);
+            let t = Instant::now();
+            let want = race.theirs(&request);
+            theirs += t.elapsed().as_nanos();
+            let t = Instant::now();
+            let got = race.ours(&request);
+            ours += t.elapsed().as_nanos();
+            different += usize::from(got != want);
+            tokens = want.len();
+        }
+        println!(
+            "{}: {conversations} conversations never seen before, one request each of {tokens} tokens; different on {different}\n  \
+             sglang {:.2} ms a request   affordance {:.2} ms a request   {:.2}x",
+            race.model,
+            theirs as f64 / 1e6 / conversations as f64,
+            ours as f64 / 1e6 / conversations as f64,
+            theirs as f64 / ours as f64,
+        );
+        assert_eq!(different, 0, "the two formatters must produce the same ids");
+    }
+}
