@@ -1,3 +1,5 @@
+> **This is Approximate Labs' fork of SGLang 0.5.23, where Affordance builds the server's prompts. See [AFFORDANCE.md](AFFORDANCE.md).** The rest of this README is upstream's.
+
 # SGLang: Fast inference for LLMs and multimodal models
 
 <p align="center" id="sglangtop">
